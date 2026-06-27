@@ -1,5 +1,7 @@
 // Dynamic API URL Configuration
-const DEFAULT_API_URL = 'http://localhost:5000/api/tasks';
+const DEFAULT_API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:5000/api/tasks'
+    : window.location.origin + '/api/tasks';
 let API_URL = localStorage.getItem('REMIND_TASK_API_URL') || DEFAULT_API_URL;
 
 let localTasks = []; // Global copy of tasks
