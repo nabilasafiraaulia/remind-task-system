@@ -2,14 +2,49 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const TASKS_FILE = path.join(__dirname, 'tasks.json');
 
-// Helper: Membaca data dari file JSON
-function readTasks() {
+// --- DUAL DATABASE ADAPTER ---
+let dbMode = 'json'; // default fallback
+
+// Define Mongoose Schema & Model
+const TaskSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    description: { type: String, default: '' },
+    deadline: { type: Date, required: true },
+    is_completed: { type: Boolean, default: false }
+}, { timestamps: true });
+
+let TaskModel;
+try {
+    TaskModel = mongoose.model('Task', TaskSchema);
+} catch (e) {
+    TaskModel = mongoose.model('Task');
+}
+
+// Koneksi ke MongoDB Atlas
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://niraswaraa:n1r45w4r4@cluster0.ssf6oa0.mongodb.net/remind_task_db?retryWrites=true&w=majority&appName=Cluster0';
+
+mongoose.connect(MONGO_URI, {
+    serverSelectionTimeoutMS: 4000 // timeout cepat agar fallback segera aktif jika di lokal diblokir ISP
+})
+.then(() => {
+    dbMode = 'mongodb';
+    console.log('✅ DATABASE CLOUD MONGODB ATLAS TERHUBUNG!');
+})
+.catch((err) => {
+    dbMode = 'json';
+    console.error('❌ Gagal terhubung ke MongoDB Atlas Cloud:', err.message);
+    console.log('🔄 Mengaktifkan database lokal berbasis file JSON (tasks.json)...');
+});
+
+// Helper JSON File Database
+function readTasksJSON() {
     try {
         if (!fs.existsSync(TASKS_FILE)) {
             fs.writeFileSync(TASKS_FILE, JSON.stringify([], null, 2));
@@ -18,21 +53,20 @@ function readTasks() {
         const data = fs.readFileSync(TASKS_FILE, 'utf8');
         return JSON.parse(data || '[]');
     } catch (error) {
-        console.error('Gagal membaca file database tasks.json:', error.message);
+        console.error('Gagal membaca tasks.json:', error.message);
         return [];
     }
 }
 
-// Helper: Menulis data ke file JSON
-function writeTasks(tasks) {
+function writeTasksJSON(tasks) {
     try {
         fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
     } catch (error) {
-        console.error('Gagal menulis ke file database tasks.json:', error.message);
+        console.error('Gagal menulis tasks.json:', error.message);
     }
 }
 
-// Production CORS Configuration
+// CORS Config
 const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:5000',
@@ -63,99 +97,112 @@ const corsOptions = {
     optionsSuccessStatus: 200
 };
 
-// Middleware
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// Inisialisasi Database File
-console.log('✅ DATABASE FILE-BASED (JSON) AKTIF!');
-console.log(`📂 Lokasi file: ${TASKS_FILE}`);
-
 // ==========================================
-// 🔥 ENDPOINT CRUD API (FILE-BASED STORAGE)
+// 🔥 ENDPOINT CRUD API (DUAL MODE DB)
 // ==========================================
 
 // 1. CREATE: Menambah Tugas Baru
-app.post('/api/tasks', (req, res) => {
+app.post('/api/tasks', async (req, res) => {
     try {
         const { title, description, deadline } = req.body;
         if (!title || !deadline) {
             return res.status(400).json({ message: 'Judul tugas dan deadline wajib diisi!' });
         }
         
-        const tasks = readTasks();
-        const newTask = {
-            _id: Math.random().toString(36).substring(2, 9) + Date.now().toString(36), // ID unik mirip MongoDB _id
-            title,
-            description: description || '',
-            deadline,
-            is_completed: false,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-        };
-        
-        tasks.push(newTask);
-        writeTasks(tasks);
-        
-        res.status(201).json(newTask);
+        if (dbMode === 'mongodb') {
+            const newTask = new TaskModel({ title, description, deadline });
+            await newTask.save();
+            return res.status(201).json(newTask);
+        } else {
+            const tasks = readTasksJSON();
+            const newTask = {
+                _id: Math.random().toString(36).substring(2, 9) + Date.now().toString(36),
+                title,
+                description: description || '',
+                deadline,
+                is_completed: false,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+            tasks.push(newTask);
+            writeTasksJSON(tasks);
+            return res.status(201).json(newTask);
+        }
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
 // 2. READ: Mengambil Semua Daftar Tugas
-app.get('/api/tasks', (req, res) => {
+app.get('/api/tasks', async (req, res) => {
     try {
-        const tasks = readTasks();
-        // Urutkan berdasarkan deadline terdekat
-        tasks.sort((a, b) => new Date(a.deadline) - new Date(b.deadline));
-        res.json(tasks);
+        if (dbMode === 'mongodb') {
+            const tasks = await TaskModel.find().sort({ deadline: 1 });
+            return res.json(tasks);
+        } else {
+            const tasks = readTasksJSON();
+            tasks.sort((a, b) => new Date(a.deadline) - new Date(b.deadline));
+            return res.json(tasks);
+        }
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
 // 3. UPDATE: Mengubah Status Tugas atau Mengedit Isinya
-app.put('/api/tasks/:id', (req, res) => {
+app.put('/api/tasks/:id', async (req, res) => {
     try {
         const { title, description, deadline, is_completed } = req.body;
-        const tasks = readTasks();
-        const taskIndex = tasks.findIndex(t => t._id === req.params.id);
         
-        if (taskIndex === -1) {
-            return res.status(404).json({ message: 'Tugas tidak ditemukan!' });
+        if (dbMode === 'mongodb') {
+            const updatedTask = await TaskModel.findByIdAndUpdate(
+                req.params.id,
+                { title, description, deadline, is_completed },
+                { new: true, runValidators: true }
+            );
+            if (!updatedTask) return res.status(404).json({ message: 'Tugas tidak ditemukan!' });
+            return res.json(updatedTask);
+        } else {
+            const tasks = readTasksJSON();
+            const taskIndex = tasks.findIndex(t => t._id === req.params.id);
+            if (taskIndex === -1) return res.status(404).json({ message: 'Tugas tidak ditemukan!' });
+            
+            const updatedTask = {
+                ...tasks[taskIndex],
+                title: title !== undefined ? title : tasks[taskIndex].title,
+                description: description !== undefined ? description : tasks[taskIndex].description,
+                deadline: deadline !== undefined ? deadline : tasks[taskIndex].deadline,
+                is_completed: is_completed !== undefined ? is_completed : tasks[taskIndex].is_completed,
+                updatedAt: new Date().toISOString()
+            };
+            tasks[taskIndex] = updatedTask;
+            writeTasksJSON(tasks);
+            return res.json(updatedTask);
         }
-        
-        const updatedTask = {
-            ...tasks[taskIndex],
-            title: title !== undefined ? title : tasks[taskIndex].title,
-            description: description !== undefined ? description : tasks[taskIndex].description,
-            deadline: deadline !== undefined ? deadline : tasks[taskIndex].deadline,
-            is_completed: is_completed !== undefined ? is_completed : tasks[taskIndex].is_completed,
-            updatedAt: new Date().toISOString()
-        };
-        
-        tasks[taskIndex] = updatedTask;
-        writeTasks(tasks);
-        
-        res.json(updatedTask);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
 // 4. DELETE: Menghapus Tugas
-app.delete('/api/tasks/:id', (req, res) => {
+app.delete('/api/tasks/:id', async (req, res) => {
     try {
-        const tasks = readTasks();
-        const filteredTasks = tasks.filter(t => t._id !== req.params.id);
-        
-        if (tasks.length === filteredTasks.length) {
-            return res.status(404).json({ message: 'Tugas tidak ditemukan!' });
+        if (dbMode === 'mongodb') {
+            const deletedTask = await TaskModel.findByIdAndDelete(req.params.id);
+            if (!deletedTask) return res.status(404).json({ message: 'Tugas tidak ditemukan!' });
+            return res.json({ message: 'Tugas berhasil dihapus!' });
+        } else {
+            const tasks = readTasksJSON();
+            const filteredTasks = tasks.filter(t => t._id !== req.params.id);
+            if (tasks.length === filteredTasks.length) {
+                return res.status(404).json({ message: 'Tugas tidak ditemukan!' });
+            }
+            writeTasksJSON(filteredTasks);
+            return res.json({ message: 'Tugas berhasil dihapus!' });
         }
-        
-        writeTasks(filteredTasks);
-        res.json({ message: 'Tugas berhasil dihapus!' });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -165,12 +212,17 @@ app.delete('/api/tasks/:id', (req, res) => {
 app.get('/', (req, res) => {
     res.json({ 
         status: 'online', 
-        message: 'Server Remind Task System Berhasil Berjalan dengan Database File!',
+        message: 'Server Remind Task System Berhasil Berjalan!',
+        dbMode,
         env: process.env.NODE_ENV || 'development'
     });
 });
 
-// Menjalankan Server
-app.listen(PORT, () => {
-    console.log(`Server berjalan di port ${PORT} dalam mode ${process.env.NODE_ENV || 'development'}`);
-});
+// Jalankan Server Lokal (Hanya jika dijalankan mandiri, bukan serverless Vercel)
+if (require.main === module || !process.env.VERCEL) {
+    app.listen(PORT, () => {
+        console.log(`Server berjalan di port ${PORT} dalam mode ${process.env.NODE_ENV || 'development'} (Database: ${dbMode})`);
+    });
+}
+
+module.exports = app;

@@ -1,0 +1,14 @@
+{
+  "name": "remind-task-system-root",
+  "version": "1.0.0",
+  "description": "Root package.json for Vercel deployment of Remind Task System",
+  "scripts": {
+    "start": "node backend/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "mongoose": "^9.7.3"
+  }
+}
